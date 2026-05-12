@@ -1,0 +1,162 @@
+mod plate_manager;
+mod dict_encoder;
+mod utils;
+mod models;
+mod easycard_loader;
+mod sorted_index;
+mod busstop_loader;
+mod matching;
+
+use std::env;
+use std::fs;
+use log::{info, warn, error};
+use plate_manager::PlateManager;
+use dict_encoder::DictEncoder;
+use easycard_loader::{easycard_loader};
+use busstop_loader::{busstop_loader};
+use matching::match_and_write_day_results;
+use utils::{format_day_index};
+use csv::Writer;
+
+fn main() {
+    // Set default log level to 'info' if RUST_LOG is not set.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    
+    let program_start_time = std::time::Instant::now(); // Overall program timer
+
+    let mut args: Vec<String> = env::args().collect();
+    let mut data_dir = ".".to_string();
+    let mut output_route_file = false;
+
+    // --- Argument Parsing ---
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-d" | "--datadir" => {
+                if i + 1 < args.len() {
+                    data_dir = args.remove(i + 1);
+                    args.remove(i);
+                } else {
+                    error!("{} flag requires a path.", args[i]);
+                    return;
+                }
+            },
+            "-route" => {
+                output_route_file = true;
+                args.remove(i);
+            },
+            _ => i += 1,
+        }
+    }
+
+    let file_paths_args = args.drain(1..).collect::<Vec<String>>();
+    if file_paths_args.is_empty() {
+        info!("Usage: ecbus [-route] [-d /path/to/data] <easycard_csv_file1> ...");
+        return;
+    }
+
+    info!("Scanning for bus stop data in: {}", data_dir);
+
+    let file_paths: Vec<&str> = file_paths_args.iter().map(|s| s.as_str()).collect();
+    
+    let mut pm = PlateManager::new(10000);
+    let mut company_dict = DictEncoder::new(100, 2000);
+    let mut tx_type_dict = DictEncoder::new(100, 2000);
+
+    let (transactions, day_indices) = match easycard_loader(&file_paths, &mut pm, &mut tx_type_dict, &mut company_dict) {
+        Ok(res) => res,
+        Err(e) => {
+            error!("Error loading EasyCard: {}", e);
+            return;
+        }
+    };
+
+    info!("Total EasyCard records loaded: {}", transactions.len());
+    
+    let mut stop_name_dict = DictEncoder::new(10000, 200_000);
+
+    for day in day_indices {
+        let day_processing_start_time = std::time::Instant::now();
+
+        let date_d_str = format_day_index(day.logical_day);
+        let tx_day_slice = &transactions[day.start .. day.start + day.count];
+        let date_d_plus_1_str = format_day_index(day.logical_day + 1);
+        
+        let mut busstop_files = Vec::new();
+        if let Ok(entries) = fs::read_dir(&data_dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_name) = entry.file_name().into_string() {
+                    let path_str = entry.path().to_string_lossy().to_string();
+                    
+                    if file_paths.contains(&path_str.as_str()) { continue; }
+
+                    let is_csv = file_name.ends_with(".CSV") || file_name.ends_with(".csv");
+                    if is_csv && (file_name.contains(&date_d_str) || file_name.contains(&date_d_plus_1_str)) {
+                        busstop_files.push(path_str);
+                    }
+                }
+            }
+        }
+
+        if busstop_files.is_empty() {
+            warn!("Missing bus stop file for {}", date_d_str);
+            let day_processing_duration = day_processing_start_time.elapsed();
+            info!("Completed {} in {} ms", date_d_str, day_processing_duration.as_millis());
+            continue;
+        }
+        
+        let (bus_stops, _stats) = match busstop_loader(&busstop_files, day.logical_day, &mut pm, &mut stop_name_dict) {
+            Ok(res) => res,
+            Err(e) => {
+                error!("Error loading BusStop data for {}: {}", date_d_str, e);
+                let day_processing_duration = day_processing_start_time.elapsed();
+                info!("Completed {} in {} ms", date_d_str, day_processing_duration.as_millis());
+                continue;
+            }
+        };
+
+        if bus_stops.is_empty() {
+            warn!("No bus stop data for {} after filtering.", date_d_str);
+            let day_processing_duration = day_processing_start_time.elapsed();
+            info!("Completed {} in {} ms", date_d_str, day_processing_duration.as_millis());
+            continue;
+        }
+
+        info!("Processing {}: {} txs vs {} stops", 
+            date_d_str, tx_day_slice.len(), bus_stops.len());
+
+        let output_filename = format!("ecbus_{}.csv", date_d_str);
+        
+        let mut route_writer_opt: Option<Writer<std::fs::File>> = None;
+        if output_route_file {
+            let route_filename = format!("route_{}.csv", date_d_str);
+            info!("Outputting to {} & {}", output_filename, route_filename);
+            let mut writer = Writer::from_path(&route_filename).expect("Failed to create route file");
+            writer.write_record(&[
+                "card_id", "tx_on_time", "tx_off_time", 
+                "stop_name", "stop_arrival_time", "stop_depart_time", "pairing_status"
+            ]).expect("Failed to write route header");
+            route_writer_opt = Some(writer);
+        } else {
+            info!("Outputting to {}", output_filename);
+        }
+        
+        match_and_write_day_results(
+            &output_filename,
+            tx_day_slice,
+            &bus_stops,
+            &pm,
+            &tx_type_dict,
+            &company_dict,
+            &stop_name_dict,
+            &mut route_writer_opt,
+            output_route_file,
+        ).unwrap();
+
+        let day_processing_duration = day_processing_start_time.elapsed();
+        info!("Completed {} in {} ms", date_d_str, day_processing_duration.as_millis());
+    }
+
+    let total_program_duration = program_start_time.elapsed();
+    info!("Total program running time: {:?}", total_program_duration);
+}

@@ -1,0 +1,14 @@
+[package]
+name = "ecbus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fnv = "1.0"
+chrono = "0.4"
+csv = "1.3"
+log = "0.4"
+env_logger = "0.10"
+
+[dev-dependencies]
+tempfile = "3.8"
