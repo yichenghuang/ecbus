@@ -37,6 +37,18 @@ impl PlateManager {
         }
     }
 
+    pub fn get_id(&self, plate_bytes: &[u8]) -> u32 {
+        let mut fixed_plate = [0u8; 8];
+        let len = plate_bytes.len().min(8);
+        fixed_plate[..len].copy_from_slice(&plate_bytes[..len]);
+
+        if let Some(&index) = self.lookup.get(&fixed_plate) {
+            index
+        } else {
+            u32::MAX
+        }
+    }
+
     pub fn get_string(&self, index: u32) -> &str {
         let bytes = &self.pool[index as usize];
         let len = bytes.iter().position(|&b| b == 0).unwrap_or(8);

@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, TimeZone, Utc, FixedOffset};
+use chrono::{NaiveDate, TimeZone, FixedOffset};
 
 #[inline(always)]
 fn bytes_to_int(bytes: &[u8]) -> u32 {

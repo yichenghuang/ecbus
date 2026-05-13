@@ -16,6 +16,7 @@ pub fn match_and_write_day_results(
     stop_name_dict: &DictEncoder,
     route_writer_opt: &mut Option<Writer<std::fs::File>>,
     output_route_file: bool,
+    grace_period: u64,
 ) -> Result<(), Box<dyn Error>> {
     let mut writer = Writer::from_path(output_filename)?;
 
@@ -53,14 +54,32 @@ pub fn match_and_write_day_results(
                 p1 += 1;
             }
 
+            // Fallback for the last stop
+            if onboard_stop_idx.is_none() && current_stop_slice.last().unwrap().arrival_time <= tx.on_time {
+                onboard_stop_idx = Some(current_stop_slice.len() - 1);
+                stop_scan_indices[tx.plate_id as usize] = current_stop_slice.len() - 1;
+            }
+
             if tx.off_time > 0 && onboard_stop_idx.is_some() {
                 let mut p2 = onboard_stop_idx.unwrap();
                 while p2 < current_stop_slice.len() {
-                    if current_stop_slice[p2].depart_time > tx.off_time {
+                    if current_stop_slice[p2].depart_time >= tx.off_time {
                         alight_stop_idx = Some(p2);
                         break;
                     }
                     p2 += 1;
+                }
+            }
+
+            // Apply Grace Period Rule
+            if let Some(idx) = onboard_stop_idx {
+                if tx.on_time.saturating_sub(current_stop_slice[idx].arrival_time) > grace_period {
+                    onboard_stop_idx = None;
+                }
+            }
+            if let Some(idx) = alight_stop_idx {
+                if tx.off_time > 0 && current_stop_slice[idx].depart_time.saturating_sub(tx.off_time) > grace_period {
+                    alight_stop_idx = None;
                 }
             }
         }
@@ -80,31 +99,46 @@ pub fn match_and_write_day_results(
             ("異常", "OD_NG", "時間_NG")
         };
 
-        let board_stop = onboard_stop_idx.map(|i| stop_name_dict.get_string(current_stop_slice[i].stop_name_tw)).unwrap_or("");
-        let alight_stop = alight_stop_idx.map(|i| stop_name_dict.get_string(current_stop_slice[i].stop_name_tw)).unwrap_or("");
+        // If off_time is > 0, we MUST have found an alight_stop_idx.
+        // If off_time == 0, we don't have an alight stop, but we might still consider it valid if onboard was found.
+        // The user requested: "If either on_time, or off_time is unfound or cannot be found... output NULL".
+        let is_valid_match = onboard_stop_idx.is_some() && (tx.off_time == 0 || alight_stop_idx.is_some());
 
-        let route = if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
-            if t_idx >= s_idx {
-                current_stop_slice[s_idx..=t_idx].iter()
-                    .map(|s| stop_name_dict.get_string(s.stop_name_tw))
-                    .collect::<Vec<_>>()
-                    .join(",")
+        let (board_stop, alight_stop, route) = if is_valid_match {
+            let b = stop_name_dict.get_string(current_stop_slice[onboard_stop_idx.unwrap()].stop_name_tw).to_string();
+            let a = if let Some(idx) = alight_stop_idx {
+                stop_name_dict.get_string(current_stop_slice[idx].stop_name_tw).to_string()
             } else {
                 "".to_string()
-            }
+            };
+            
+            let r = if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
+                if t_idx >= s_idx {
+                    current_stop_slice[s_idx..=t_idx].iter()
+                        .map(|s| stop_name_dict.get_string(s.stop_name_tw))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                } else {
+                    "".to_string()
+                }
+            } else {
+                "".to_string()
+            };
+            (b, a, r)
         } else {
-            "".to_string()
+            ("NULL".to_string(), "NULL".to_string(), "NULL".to_string())
         };
         
-        let (map_status, pair_ref) = if onboard_stop_idx.is_some() && (tx.off_time == 0 || alight_stop_idx.is_some()) {
+        let (map_status, pair_ref) = if is_valid_match {
             ("配對_OK", "OK")
         } else {
             ("配對_NG", "NG")
         };
 
         if output_route_file {
-            if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
-                if let Some(writer) = route_writer_opt.as_mut() { 
+            if let Some(writer) = route_writer_opt.as_mut() {
+                if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
+                    // Full route found
                     for i in s_idx..=t_idx {
                         let stop = &current_stop_slice[i];
                         let status_str = match stop.pairing {
@@ -121,6 +155,58 @@ pub fn match_and_write_day_results(
                             timestamp_to_time_string(stop.depart_time).to_string(),
                             status_str.to_string(),
                         ])?;
+                    }
+                } else {
+                    // Partial or no route found. Report on_stop and off_stop separately.
+                    
+                    // 1. Report Boarding Stop (or NULL)
+                    if let Some(s_idx) = onboard_stop_idx {
+                        let stop = &current_stop_slice[s_idx];
+                        writer.write_record(&[
+                            tx.card_id.to_string(),
+                            timestamp_to_time_string(tx.on_time).to_string(),
+                            if tx.off_time > 0 { timestamp_to_time_string(tx.off_time).to_string() } else { "".to_string() },
+                            stop_name_dict.get_string(stop.stop_name_tw).to_string(),
+                            timestamp_to_time_string(stop.arrival_time).to_string(),
+                            timestamp_to_time_string(stop.depart_time).to_string(),
+                            "OK".to_string(),
+                        ])?;
+                    } else {
+                        writer.write_record(&[
+                            tx.card_id.to_string(),
+                            timestamp_to_time_string(tx.on_time).to_string(),
+                            if tx.off_time > 0 { timestamp_to_time_string(tx.off_time).to_string() } else { "".to_string() },
+                            "NULL".to_string(),
+                            "NULL".to_string(),
+                            "NULL".to_string(),
+                            "NULL".to_string(),
+                        ])?;
+                    }
+
+                    // 2. Report Alighting Stop (or NULL) if off_time exists
+                    if tx.off_time > 0 {
+                        if let Some(t_idx) = alight_stop_idx {
+                            let stop = &current_stop_slice[t_idx];
+                            writer.write_record(&[
+                                tx.card_id.to_string(),
+                                timestamp_to_time_string(tx.on_time).to_string(),
+                                timestamp_to_time_string(tx.off_time).to_string(),
+                                stop_name_dict.get_string(stop.stop_name_tw).to_string(),
+                                timestamp_to_time_string(stop.arrival_time).to_string(),
+                                timestamp_to_time_string(stop.depart_time).to_string(),
+                                "OK".to_string(),
+                            ])?;
+                        } else {
+                            writer.write_record(&[
+                                tx.card_id.to_string(),
+                                timestamp_to_time_string(tx.on_time).to_string(),
+                                timestamp_to_time_string(tx.off_time).to_string(),
+                                "NULL".to_string(),
+                                "NULL".to_string(),
+                                "NULL".to_string(),
+                                "NULL".to_string(),
+                            ])?;
+                        }
                     }
                 }
             }
@@ -142,8 +228,8 @@ pub fn match_and_write_day_results(
             status2.to_string(),
             status3.to_string(),
             "".to_string(), // RouteNameZh_tw
-            board_stop.to_string(),
-            alight_stop.to_string(),
+            board_stop,
+            alight_stop,
             route,
             map_status.to_string(),
             pair_ref.to_string(),

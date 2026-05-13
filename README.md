@@ -27,26 +27,45 @@ This will create an executable at `target/release/ecbus`.
 
 ### Running the Program
 
+The `ecbus` tool supports two operating modes:
+
+1. **EasyCard Processing Mode** — process one or more EasyCard transaction CSV files.
+2. **Bus Stop Query Mode** — read bus stop logs and print records filtered by date and/or plate ID.
+
+The `-d` or `--datadir` flag can be used in both modes to specify the directory containing bus stop data files. If not provided, the current working directory (`.`) is used by default.
+
 The `ecbus` tool accepts one or more EasyCard CSV files as input. You can optionally include the `-route` flag to generate detailed route verification files, and the `-d` or `--datadir` flag to specify the directory containing bus stop data. If `-d` is not provided, the current working directory (`.`) will be used by default.
 
-**Basic Usage (without route file):**
+---
+
+## 1. EasyCard Processing Mode
+
+Process one or more EasyCard CSV files as input.
+
+### Basic Usage
 ```bash
 ecbus [-d /path/to/data] <path_to_easycard_file1.csv> [path_to_easycard_file2.csv ...]
 ```
+
 Example (using default data directory): 
 ```bash
 ecbus ../ecdata/easycard_2025-02-11.csv
 ```
+
 Example (specifying data directory):
 ```bash
 ecbus -d ../ecdata/ ../ecdata/easycard_2025-02-11.csv
 ```
 
-**Usage (with route file generation):**
-Include the `-route` flag before your input CSV files.wa
+### Route File Generation
+
+Include the `-route` flag to generate detailed route verification files.
+
+
 ```bash
 ecbus -route [-d /path/to/data] <path_to_easycard_file1.csv> [path_to_easycard_file2.csv ...]
 ```
+
 Example (specifying data directory):
 ```bash
 ecbus -route -d ../ecdata/ ../ecdata/easycard_2025-02-11.csv
@@ -60,3 +79,26 @@ For each unique "logical day" found in your EasyCard transaction data, the progr
     -   Includes original transaction details, decoded `BUS_NO`, `LINE_NO`, `board_stop`, `alight_stop`, the full `route` (comma-separated stop names), and `mapping_status`.
 2.  **`route_YYYY-MM-DD.csv` (Optional, generated with `-route` flag)**: A detailed log for verification purposes.
     -   Lists each stop on a matched route, including the `card_id`, transaction `on_time` and `off_time`, the `stop_name`, `stop_arrival_time`, `stop_depart_time`, and `pairing_status` of the individual bus stop event (e.g., `OK`, `NoArr`, `NoDptr`).
+    
+## 2. Bus Stop Query Mode
+
+Read bus stop logs and print route for specified plate.
+
+### Usage
+```bash
+ecbus [-d /path/to/data] --date <YYYY-MM-DD> --plate <PLATE_ID>
+```
+
+### Examples
+
+Query records for a specific plate ID:
+```bash
+ecbus --date 2025-02-11 --plate KKA-1234
+```
+
+Using a custom data directory:
+```bash
+ecbus -d ../ecdata/ --date 2025-02-11 --plate KKA-1234
+```
+
+

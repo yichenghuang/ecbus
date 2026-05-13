@@ -85,6 +85,7 @@ pub fn busstop_loader(
         
         let mut rdr = ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true) // Allow malformed/truncated rows
             .from_reader(file);
 
         let headers = match rdr.headers() {
@@ -95,8 +96,13 @@ pub fn busstop_loader(
             continue;
         }
 
-        while rdr.read_byte_record(&mut record)? {
-            let time_str = std::str::from_utf8(record.get(21).unwrap_or(b""))?.trim();
+        while let Ok(has_more) = rdr.read_byte_record(&mut record) {
+            if !has_more { break; }
+            
+            // Check if record is long enough to have the time string
+            if record.len() < 22 { continue; }
+
+            let time_str = std::str::from_utf8(record.get(21).unwrap_or(b"")).unwrap_or("").trim();
             let dt = match DateTime::parse_from_rfc3339(time_str) {
                 Ok(d) => d,
                 Err(_) => continue,
