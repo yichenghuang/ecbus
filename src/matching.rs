@@ -29,7 +29,6 @@ pub fn match_and_write_day_results(
     ])?;
 
     let stop_plate_index = build_busstop_plate_index(bus_stops, pm.len());
-    let mut stop_scan_indices = vec![0; pm.len()]; 
 
     for tx in tx_slice {
         let stop_idx = &stop_plate_index[tx.plate_id as usize];
@@ -43,21 +42,26 @@ pub fn match_and_write_day_results(
         let mut alight_stop_idx: Option<usize> = None;
 
         if !current_stop_slice.is_empty() {
-            let mut p1 = stop_scan_indices[tx.plate_id as usize];
-            while p1 + 1 < current_stop_slice.len() {
-                if current_stop_slice[p1].arrival_time <= tx.on_time &&
-                   current_stop_slice[p1 + 1].arrival_time > tx.on_time {
+            let mut p1 = 0;
+            while p1 < current_stop_slice.len() {
+                let next_arrival = if p1 + 1 < current_stop_slice.len() {
+                    current_stop_slice[p1 + 1].arrival_time
+                } else {
+                    u64::MAX
+                };
+
+                if tx.on_time < next_arrival {
                     onboard_stop_idx = Some(p1);
-                    stop_scan_indices[tx.plate_id as usize] = p1; 
                     break;
                 }
                 p1 += 1;
             }
 
-            // Fallback for the last stop
-            if onboard_stop_idx.is_none() && current_stop_slice.last().unwrap().arrival_time <= tx.on_time {
-                onboard_stop_idx = Some(current_stop_slice.len() - 1);
-                stop_scan_indices[tx.plate_id as usize] = current_stop_slice.len() - 1;
+            // Fallback for the very last stop if on_time is after it
+            if onboard_stop_idx.is_none() && !current_stop_slice.is_empty() {
+                if tx.on_time >= current_stop_slice.last().unwrap().arrival_time {
+                    onboard_stop_idx = Some(current_stop_slice.len() - 1);
+                }
             }
 
             if tx.off_time > 0 && onboard_stop_idx.is_some() {
@@ -71,15 +75,23 @@ pub fn match_and_write_day_results(
                 }
             }
 
-            // Apply Grace Period Rule
+            // Apply Dual-Distance Grace Period Rule
             if let Some(idx) = onboard_stop_idx {
-                if tx.on_time.saturating_sub(current_stop_slice[idx].arrival_time) > grace_period {
+                let stop = &current_stop_slice[idx];
+                let diff_arr = tx.on_time.abs_diff(stop.arrival_time);
+                let diff_dep = tx.on_time.abs_diff(stop.depart_time);
+                if diff_arr > grace_period && diff_dep > grace_period {
                     onboard_stop_idx = None;
                 }
             }
             if let Some(idx) = alight_stop_idx {
-                if tx.off_time > 0 && current_stop_slice[idx].depart_time.saturating_sub(tx.off_time) > grace_period {
-                    alight_stop_idx = None;
+                if tx.off_time > 0 {
+                    let stop = &current_stop_slice[idx];
+                    let diff_arr = tx.off_time.abs_diff(stop.arrival_time);
+                    let diff_dep = tx.off_time.abs_diff(stop.depart_time);
+                    if diff_arr > grace_period && diff_dep > grace_period {
+                        alight_stop_idx = None;
+                    }
                 }
             }
         }
@@ -99,38 +111,64 @@ pub fn match_and_write_day_results(
             ("異常", "OD_NG", "時間_NG")
         };
 
-        // If off_time is > 0, we MUST have found an alight_stop_idx.
-        // If off_time == 0, we don't have an alight stop, but we might still consider it valid if onboard was found.
-        // The user requested: "If either on_time, or off_time is unfound or cannot be found... output NULL".
-        let is_valid_match = onboard_stop_idx.is_some() && (tx.off_time == 0 || alight_stop_idx.is_some());
+        // Decide overall pair status
+        let is_perfect_pair = onboard_stop_idx.is_some() && (tx.off_time == 0 || alight_stop_idx.is_some());
 
-        let (board_stop, alight_stop, route) = if is_valid_match {
-            let b = stop_name_dict.get_string(current_stop_slice[onboard_stop_idx.unwrap()].stop_name_tw).to_string();
-            let a = if let Some(idx) = alight_stop_idx {
-                stop_name_dict.get_string(current_stop_slice[idx].stop_name_tw).to_string()
-            } else {
-                "".to_string()
-            };
-            
-            let r = if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
-                if t_idx >= s_idx {
-                    current_stop_slice[s_idx..=t_idx].iter()
-                        .map(|s| stop_name_dict.get_string(s.stop_name_tw))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                } else {
-                    "".to_string()
-                }
-            } else {
-                "".to_string()
-            };
-            (b, a, r)
+        let board_stop = if let Some(idx) = onboard_stop_idx {
+            stop_name_dict.get_string(current_stop_slice[idx].stop_name_tw).to_string()
         } else {
-            ("NULL".to_string(), "NULL".to_string(), "NULL".to_string())
+            "NULL".to_string()
+        };
+
+        let alight_stop = if let Some(idx) = alight_stop_idx {
+            stop_name_dict.get_string(current_stop_slice[idx].stop_name_tw).to_string()
+        } else {
+            "NULL".to_string()
+        };
+
+        let route = if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
+            if t_idx >= s_idx {
+                let mut route_parts = Vec::new();
+                let mut i = s_idx;
+                while i <= t_idx {
+                    let start_stop = &current_stop_slice[i];
+                    let stop_name = stop_name_dict.get_string(start_stop.stop_name_tw);
+                    let arrival_time = start_stop.arrival_time;
+                    let mut depart_time = start_stop.depart_time;
+
+                    // Look ahead for consecutive identical stops
+                    let mut j = i + 1;
+                    while j <= t_idx {
+                        let next_stop = &current_stop_slice[j];
+                        if stop_name_dict.get_string(next_stop.stop_name_tw) == stop_name {
+                            depart_time = next_stop.depart_time; // Update to the last depart time
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let time_str = if i == t_idx {
+                        timestamp_to_time_string(depart_time)
+                    } else {
+                        timestamp_to_time_string(arrival_time)
+                    };
+                    route_parts.push(format!("{}({})", stop_name, time_str));
+                    
+                    i = j; // Move index past all processed duplicates
+                }
+                route_parts.join(",")
+            } else {
+                "NULL".to_string()
+            }
+        } else {
+            "NULL".to_string()
         };
         
-        let (map_status, pair_ref) = if is_valid_match {
+        let (map_status, pair_ref) = if is_perfect_pair {
             ("配對_OK", "OK")
+        } else if onboard_stop_idx.is_some() || alight_stop_idx.is_some() {
+            ("配對_部分", "Partial")
         } else {
             ("配對_NG", "NG")
         };
@@ -139,22 +177,42 @@ pub fn match_and_write_day_results(
             if let Some(writer) = route_writer_opt.as_mut() {
                 if let (Some(s_idx), Some(t_idx)) = (onboard_stop_idx, alight_stop_idx) {
                     // Full route found
-                    for i in s_idx..=t_idx {
-                        let stop = &current_stop_slice[i];
-                        let status_str = match stop.pairing {
+                    let mut i = s_idx;
+                    while i <= t_idx {
+                        let start_stop = &current_stop_slice[i];
+                        let stop_name = stop_name_dict.get_string(start_stop.stop_name_tw).to_string();
+                        let arrival_time = start_stop.arrival_time;
+                        let mut depart_time = start_stop.depart_time;
+
+                        // Look ahead for consecutive identical stops
+                        let mut j = i + 1;
+                        while j <= t_idx {
+                            let next_stop = &current_stop_slice[j];
+                            if stop_name_dict.get_string(next_stop.stop_name_tw) == stop_name {
+                                depart_time = next_stop.depart_time; // Update to the last depart time
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        
+                        let status_str = match start_stop.pairing {
                             PairingStatus::Ok => "OK",
                             PairingStatus::NoArrival => "NoArr",
                             PairingStatus::NoDeparture => "NoDptr",
                         };
+
                         writer.write_record(&[
                             tx.card_id.to_string(),
                             timestamp_to_time_string(tx.on_time).to_string(),
                             timestamp_to_time_string(tx.off_time).to_string(),
-                            stop_name_dict.get_string(stop.stop_name_tw).to_string(),
-                            timestamp_to_time_string(stop.arrival_time).to_string(),
-                            timestamp_to_time_string(stop.depart_time).to_string(),
+                            stop_name,
+                            timestamp_to_time_string(arrival_time).to_string(),
+                            timestamp_to_time_string(depart_time).to_string(),
                             status_str.to_string(),
                         ])?;
+                        
+                        i = j; // Move index past all processed duplicates
                     }
                 } else {
                     // Partial or no route found. Report on_stop and off_stop separately.

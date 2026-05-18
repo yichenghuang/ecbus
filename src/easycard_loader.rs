@@ -24,13 +24,12 @@ pub fn easycard_loader(
             .has_headers(true)
             .from_reader(file);
 
-        let headers = rdr.headers()?.clone();
-        if headers.get(0) != Some("卡號") {
-            return Err(format!("File {} is not a valid EasyCard CSV", path).into());
-        }
-
         while rdr.read_byte_record(&mut record)? {
-            let card_id: u64 = std::str::from_utf8(&record[0])?.trim().parse()?;
+            // Optional: Skip if record is obviously too short
+            if record.len() < 13 { continue; }
+
+            let card_id_bytes = trim_bytes(&record[0]);
+            let card_id: u64 = std::str::from_utf8(card_id_bytes).unwrap_or("0").parse().unwrap_or(0);
 
             let (seq_no_on, seq_no_off) = parse_u32_pair(&record[1]);
             let tx_type_id = tx_type_dict.insert(trim_bytes(&record[2]));
@@ -42,10 +41,11 @@ pub fn easycard_loader(
             
             let company_id = company_dict.insert(trim_bytes(&record[4]));
 
-            let line_no: u32 = std::str::from_utf8(&record[10])?.trim().parse().unwrap_or(0);
+            let line_no_str = std::str::from_utf8(trim_bytes(&record[10])).unwrap_or("0");
+            let line_no: u32 = line_no_str.parse().unwrap_or(0);
 
-            let on_date_bytes = &record[5];
-            let on_time_bytes = &record[6];
+            let on_date_bytes = trim_bytes(&record[5]);
+            let on_time_bytes = trim_bytes(&record[6]);
             
             if on_date_bytes.len() < 10 || on_time_bytes.len() < 8 {
                 continue;
@@ -72,7 +72,16 @@ pub fn easycard_loader(
                 0
             };
 
-            let plate_id = pm.insert(trim_bytes(&record[12]));
+            let raw_plate = trim_bytes(&record[12]);
+            let mut cleaned_plate = [0u8; 8];
+            let mut len = 0;
+            for &b in raw_plate {
+                if b != b'-' && len < 8 {
+                    cleaned_plate[len] = b;
+                    len += 1;
+                }
+            }
+            let plate_id = pm.insert(&cleaned_plate[..len]);
 
             transactions.push(Transaction {
                 card_id,

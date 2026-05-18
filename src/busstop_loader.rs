@@ -124,7 +124,18 @@ pub fn busstop_loader(
             let plate_bytes = &record[0];
             let mut cleaned_plate = [0u8; 8];
             let mut len = 0;
-            for &b in plate_bytes {
+            
+            // Trim whitespace manually or use a helper
+            let mut start = 0;
+            while start < plate_bytes.len() && plate_bytes[start].is_ascii_whitespace() {
+                start += 1;
+            }
+            let mut end = plate_bytes.len();
+            while end > start && plate_bytes[end - 1].is_ascii_whitespace() {
+                end -= 1;
+            }
+
+            for &b in &plate_bytes[start..end] {
                 if b != b'-' && len < 8 {
                     cleaned_plate[len] = b;
                     len += 1;
@@ -173,33 +184,49 @@ pub fn busstop_loader(
         let is_first = prev_plate != Some(curr.plate_id);
         let is_last = next_stop.as_ref().map(|s| s.plate_id) != Some(curr.plate_id);
 
-        if is_first && curr.arrival_time.is_none() {
-            curr.arrival_time = Some(curr.depart_time.unwrap().saturating_sub(600));
-        }
-        else if !is_first && curr.arrival_time.is_none() {
-            let p_dep = prev_depart.unwrap();
+        // 1. Resolve missing arrival_time (Rule 3 and endpoints)
+        if curr.arrival_time.is_none() {
             let c_dep = curr.depart_time.unwrap();
-            let avg = (p_dep + c_dep) / 2;
-            curr.arrival_time = Some(c_dep.saturating_sub(30).max(avg + 1));
+            if is_first {
+                curr.arrival_time = Some(c_dep.saturating_sub(600));
+            } else {
+                let p_dep = prev_depart.unwrap();
+                let avg = (p_dep + c_dep) / 2;
+                curr.arrival_time = Some(c_dep.saturating_sub(600).max(avg));
+            }
         }
 
-        if is_last && curr.depart_time.is_none() {
-            curr.depart_time = Some(curr.arrival_time.unwrap() + 600);
-        }
-        else if !is_last && curr.depart_time.is_none() {
-            let mut nxt = next_stop.unwrap(); 
+        // 2. Resolve missing depart_time (Rule 1, Rule 2, and endpoints)
+        if curr.depart_time.is_none() {
             let c_arr = curr.arrival_time.unwrap();
-            
-            if let Some(n_arr) = nxt.arrival_time {
-                let avg = (c_arr + n_arr) / 2;
-                curr.depart_time = Some((c_arr + 30).min(avg));
+            if is_last {
+                curr.depart_time = Some(c_arr + 600);
             } else {
-                let n_dep = nxt.depart_time.unwrap();
-                let t = (c_arr + n_dep) / 2;
-                curr.depart_time = Some((c_arr + 30).min(t.saturating_sub(1)));
-                nxt.arrival_time = Some(n_dep.saturating_sub(30).max(t + 1));
+                let mut nxt = next_stop.unwrap(); 
+                
+                if nxt.arrival_time.is_none() {
+                    // Rule 1: Current missing depart, Next missing arrival (Terminal Crossover)
+                    let n_dep = nxt.depart_time.unwrap();
+                    let t = n_dep.saturating_sub(c_arr);
+                    if t > 1800 {
+                        // 1a: Wait > 30 mins
+                        curr.depart_time = Some(c_arr + 600);
+                        nxt.arrival_time = Some(n_dep.saturating_sub(600));
+                    } else {
+                        // 1b: Wait <= 30 mins
+                        let mid = (c_arr + n_dep) / 2;
+                        let proposed_depart = mid + 90;
+                        curr.depart_time = Some(proposed_depart.min(n_dep.saturating_sub(1)));
+                        nxt.arrival_time = Some(curr.depart_time.unwrap() + 1);
+                    }
+                } else {
+                    // Rule 2: Current missing depart, Next HAS arrival
+                    let n_arr = nxt.arrival_time.unwrap();
+                    let avg = (c_arr + n_arr) / 2;
+                    curr.depart_time = Some((c_arr + 600).min(avg));
+                }
+                next_stop = Some(nxt);
             }
-            next_stop = Some(nxt);
         }
 
         bus_stops.push(BusStop {

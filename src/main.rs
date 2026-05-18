@@ -29,7 +29,7 @@ fn main() {
     let mut output_route_file = false;
     let mut target_date: Option<String> = None;
     let mut target_plate: Option<String> = None;
-    let mut grace_period: u64 = 600; // Default 10 minutes
+    let mut grace_period: u64 = 1800; // Default 30 minutes
 
     // --- Argument Parsing ---
     let mut i = 1;
